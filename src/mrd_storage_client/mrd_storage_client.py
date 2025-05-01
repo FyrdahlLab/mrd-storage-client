@@ -6,6 +6,8 @@ from requests.adapters import HTTPAdapter
 from requests_toolbelt.sessions import BaseUrlSession
 from urllib3.util.retry import Retry
 
+import warnings
+
 DEFAULT_TIMEOUT = 3
 
 # API documentation: https://github.com/ismrmrd/mrd-storage-server/blob/main/README.md
@@ -35,9 +37,23 @@ class Blob:
         self.__dict__.update(**kwargs)
 
     def get_data(self) -> bytes:
+        """Fetch data from blob (deprecated)"""
+        warnings.warn(
+            "get_data() is deprecated and will be removed in a future version. "
+            "Use get_binary_data() for binary data or get_object() for the deserialized object.",
+            DeprecationWarning, 
+            stacklevel=2
+        )
+        return self.get_binary_data()
+    
+    def get_binary_data(self) -> bytes:
         """Fetch data from blob"""
         response = requests.get(self.data)
         return response.content
+    
+    def get_object(self) -> Any:
+        """Fetch data from blob and deserialize it"""
+        return Storage.deserialize(self.get_binary_data())
 
     def get(self, key: str, default=None):
         """Provides a dict-like get method for the Blob instance."""
@@ -100,12 +116,10 @@ class Storage:
             >>> storage.store(obj)
 
         """
+        payload = Storage.serialize(obj)
+
         if custom_tags is None:
             custom_tags = {}
-        try:
-            payload = pickle.dumps(obj)
-        except pickle.PicklingError as e:
-            raise SerializeStorageException(e) from e
 
         new_params = dict(self.base_params)
 
@@ -129,7 +143,7 @@ class Storage:
             custom_tags = {}
 
         blobs = self._search(name, at, custom_tags)
-        return [self._load_object(blob.get_data()) for blob in blobs]
+        return [blob.get_object() for blob in blobs]
 
     def fetch_blobs(self, name=None, at=None, custom_tags=None):
         """Yield iterator for all matching blob objects
@@ -137,7 +151,7 @@ class Storage:
         Example:
             >>> storage = Storage("localhost", 3333)
             >>> for blob in storage.fetch_blobs():
-            >>>     data = blob.get_data()
+            >>>     data = blob.get_object()
 
         """
         if custom_tags is None:
@@ -165,7 +179,7 @@ class Storage:
 
         new_params = {**new_params, **custom_tags}
         response = self.http.get("v1/blobs/data/latest", params=new_params)
-        return self._load_object(response.content)
+        return Storage.deserialize(response.content)
 
     def close(self):
         """Close the underlying HTTP session"""
@@ -187,18 +201,27 @@ class Storage:
         response = self.http.get("v1/blobs", params=new_params)
         return self._create_blob_obj(response.json())
 
-    def _load_object(self, data):
-        try:
-            return pickle.loads(data)
-        except pickle.UnpicklingError as e:
-            raise SerializeStorageException(e) from e
-
     def _create_blob_obj(self, json_obj):
         yield from [Blob(**item) for item in json_obj.get("items", [])]
         if json_obj.get("nextLink"):
             response = self.http.get(json_obj["nextLink"])
             yield from self._create_blob_obj(response.json())
 
+    @staticmethod
+    def serialize(obj: Any) -> bytes:
+        """Serialize a Python object into binary data"""
+        try:
+            return pickle.dumps(obj)
+        except pickle.PicklingError as e:
+            raise SerializeStorageException(e) from e
+
+    @staticmethod
+    def deserialize(binary_data: bytes):
+        """Deserialize binary data into a Python object"""
+        try:
+            return pickle.loads(binary_data)
+        except pickle.UnpicklingError as e:
+            raise SerializeStorageException(e) from e
 
 def init_http(base_url):
     class TimeoutHTTPAdapter(HTTPAdapter):
