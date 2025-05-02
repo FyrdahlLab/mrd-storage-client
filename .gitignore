@@ -129,5 +129,5 @@ dmypy.json
 .pyre/
 
 # Project specific
-test.py
+test*.py
 .vscode/
